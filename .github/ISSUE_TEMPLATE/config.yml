@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Upstream KAMP (Klipper-Adaptive-Meshing-Purging)
+    url: https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging
+    about: This is a Creality K2-specific fork. If your issue is with upstream KAMP on a non-Creality printer, file it there instead.
+  - name: Klipper project
+    url: https://github.com/Klipper3d/klipper
+    about: For issues with Klipper itself (not this fork's extras module), see upstream Klipper.

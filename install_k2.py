@@ -9,6 +9,7 @@ Usage:
     python install_k2.py --host 192.168.3.57
     python install_k2.py --host 192.168.3.57 --password MYPASS
     python install_k2.py --host 192.168.3.57 --dry-run
+    python install_k2.py --host 192.168.3.57 --revert
 
 Defaults:
     user=root, password=creality_2024 (Creality stock credential)
@@ -477,6 +478,101 @@ class Installer:
                      "warn")
             self.log(f"log tail:\n{out}", "warn")
 
+    # ---- revert ----
+    def find_latest_backup(self) -> str | None:
+        """Return the path to the latest kamp_k2_backup_* dir on the printer,
+        preferring /mnt/exUDISK (firmware-update-survivable) over UDISK."""
+        candidates = [
+            "/mnt/exUDISK/.system",
+            "/mnt/UDISK/printer_data/config/backups",
+        ]
+        for base in candidates:
+            rc, out, _ = self.run(
+                f"ls -1dt '{base}'/kamp_k2_backup_* 2>/dev/null | head -1"
+            )
+            path = out.strip()
+            if path:
+                return path
+        return None
+
+    def revert(self) -> None:
+        """Restore the most recent kamp_k2_backup and remove installed files."""
+        self.log("=== Sanity checks ===", "step")
+        self.sanity_check()
+
+        self.log("=== Finding latest backup ===", "step")
+        backup = self.find_latest_backup()
+        if not backup:
+            self.log("No kamp_k2_backup_* directory found on the printer.",
+                     "err")
+            self.log("Checked /mnt/exUDISK/.system and "
+                     "/mnt/UDISK/printer_data/config/backups", "err")
+            self.log("If you installed manually, restore your own backup and "
+                     "remove: restore_bed_mesh.py, [restore_bed_mesh], "
+                     "[include KAMP/...], KAMP/ directory.", "err")
+            sys.exit(1)
+        self.log(f"Using backup: {backup}", "ok")
+
+        # Confirm contents
+        rc, out, _ = self.run(f"ls '{backup}'")
+        self.log(f"Backup contents: {out.strip().replace(chr(10), ', ')}",
+                 "info")
+        if "printer.cfg" not in out or "gcode_macro.cfg" not in out:
+            self.log("Backup is missing printer.cfg or gcode_macro.cfg — "
+                     "aborting to avoid a half-revert.", "err")
+            sys.exit(1)
+
+        if self.dry_run:
+            self.log(f"[dry-run] would:", "dry")
+            self.log(f"[dry-run]   cp {backup}/printer.cfg -> {PRINTER_CFG}",
+                     "dry")
+            self.log(f"[dry-run]   cp {backup}/gcode_macro.cfg -> "
+                     f"{GCODE_MACRO_CFG}", "dry")
+            self.log("[dry-run]   rm /usr/share/klipper/klippy/extras/"
+                     "restore_bed_mesh.py", "dry")
+            self.log("[dry-run]   rm -rf /mnt/UDISK/printer_data/config/KAMP",
+                     "dry")
+            self.log("[dry-run]   FIRMWARE_RESTART Klippy", "dry")
+            return
+
+        self.log("=== Restoring configs ===", "step")
+        self.run(f"cp '{backup}/printer.cfg' {PRINTER_CFG}")
+        self.run(f"cp '{backup}/gcode_macro.cfg' {GCODE_MACRO_CFG}")
+        self.log("printer.cfg + gcode_macro.cfg restored from backup", "ok")
+
+        self.log("=== Removing KAMP-K2 installed files ===", "step")
+        self.run("rm -f /usr/share/klipper/klippy/extras/restore_bed_mesh.py")
+        self.run("rm -rf /mnt/UDISK/printer_data/config/KAMP")
+        self.log("Removed restore_bed_mesh.py + KAMP/ directory", "ok")
+
+        self.log("=== Restart ===", "step")
+        self.restart_klippy()
+        rc, out, _ = self.run(
+            "grep -iE 'bed_mesh_override|kamp' "
+            "/mnt/UDISK/printer_data/logs/klippy.log | "
+            "grep -i 'Klippy state' | tail -1"
+        )
+        rc, state_out, _ = self.run(
+            "python3 -c \"import socket, json, time\n"
+            "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            "s.connect('/tmp/klippy_uds')\n"
+            "s.send((json.dumps({'id':1,'method':'info'})+chr(3)).encode())\n"
+            "time.sleep(0.5); buf=b''; s.settimeout(2)\n"
+            "try:\n"
+            "  while True:\n"
+            "    c=s.recv(65536)\n"
+            "    if not c: break\n"
+            "    buf+=c\n"
+            "except: pass\n"
+            "for fr in buf.split(chr(3).encode()):\n"
+            "  if fr.strip():\n"
+            "    try: r=json.loads(fr); print(r['result']['state']); break\n"
+            "    except: pass\""
+        )
+        self.log(f"Klippy state after revert: {state_out.strip()}", "ok")
+        self.log("Revert complete. Printer is back to pre-install state.",
+                 "ok")
+
 
 # ---------- main -------------------------------------------------------------
 
@@ -491,12 +587,21 @@ def main() -> None:
                     help="Show what would change without writing anything")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="Show remote command output")
+    ap.add_argument("--revert", action="store_true",
+                    help="Restore the most recent kamp_k2_backup and remove "
+                         "all KAMP-K2 installed files, returning the printer "
+                         "to its pre-install state.")
     args = ap.parse_args()
 
     inst = Installer(args.host, args.user, args.password,
                      dry_run=args.dry_run, verbose=args.verbose)
     try:
         inst.connect()
+
+        if args.revert:
+            inst.revert()
+            return
+
         inst.log("=== Sanity checks ===", "step")
         inst.sanity_check()
         if not inst.exclude_object_section():

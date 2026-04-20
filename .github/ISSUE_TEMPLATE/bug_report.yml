@@ -1,0 +1,107 @@
+name: Bug report
+description: Something isn't working — probe walks the full bed, install errors, Klippy shutdown, etc.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The more you can fill in here, the faster this is diagnosable. If a field doesn't apply, leave it blank.
+
+  - type: dropdown
+    id: printer
+    attributes:
+      label: Printer model
+      options:
+        - K2 (260mm)
+        - K2 Plus (350mm)
+        - K1
+        - K1C
+        - K1 Max
+        - K1 SE
+        - Other (please note in details)
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Creality firmware version
+      description: From the touchscreen → Settings → About, or /tmp/.mcu_version
+      placeholder: e.g. V1.1.4.1
+    validations:
+      required: true
+
+  - type: input
+    id: klipper
+    attributes:
+      label: Klipper software_version
+      description: Run `ssh root@PRINTER python3 -c "import socket,json; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect('/tmp/klippy_uds'); s.send((json.dumps({'id':1,'method':'info'})+chr(3)).encode()); print(s.recv(65536))"` or check klippy.log first line.
+      placeholder: e.g. 09faed31-dirty
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      options:
+        - install_k2.py (auto-installer)
+        - Manual (followed docs/INSTALL_K2.md)
+        - Something else (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happens
+    attributes:
+      label: What's happening
+      description: Plain description of the symptom. "Bed mesh probes full 11x11 grid instead of adapting" / "Klippy won't start after install" / "Error message X appears when I slice".
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_expected
+    attributes:
+      label: What you expected to happen
+      description: What the printer should have done instead.
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+
+  - type: textarea
+    id: klippy_log
+    attributes:
+      label: klippy.log tail
+      description: |
+        Grab the relevant 200-300 lines around the issue:
+        `ssh root@PRINTER "tail -300 /mnt/UDISK/printer_data/logs/klippy.log"`
+        Please redact anything sensitive.
+      render: shell
+
+  - type: textarea
+    id: override_log
+    attributes:
+      label: restore_bed_mesh override log lines
+      description: |
+        `ssh root@PRINTER "grep bed_mesh_override /mnt/UDISK/printer_data/logs/klippy.log | tail -5"`
+        Shows whether the override loaded in KAMP mode, direct mode, or not at all.
+      render: shell
+
+  - type: textarea
+    id: gcode_head
+    attributes:
+      label: Sliced gcode file head (first 200 lines)
+      description: |
+        Open the .gcode file and paste the first ~200 lines here. Lets us confirm EXCLUDE_OBJECT_DEFINE is present and placed before START_PRINT.
+      render: gcode
+
+  - type: textarea
+    id: config_changes
+    attributes:
+      label: Anything else you've modified
+      description: Other custom macros, extras modules, klipper forks, etc. — anything on top of stock Creality + KAMP-K2.
