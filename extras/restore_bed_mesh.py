@@ -8,10 +8,14 @@
 # triggering a default full 11x11 mesh.
 #
 # KAMP compat: if a gcode_macro BED_MESH_CALIBRATE is present at connect
-# time (KAMP's wrapper), we override _BED_MESH_CALIBRATE (KAMP's inner
-# rename target, formerly prtouch's version). That way KAMP stays the
-# user-facing entry point and calls through to our guarded upstream.
-# Without KAMP, we override BED_MESH_CALIBRATE directly.
+# time (KAMP's wrapper), we override KAMP's inner rename target so KAMP
+# stays the user-facing entry point and calls through to our guarded
+# upstream. install_k2.py patches KAMP's Adaptive_Meshing.cfg to rename
+# to `_BMC_KAMP_INNER` (unique name, avoids colliding with Creality's
+# pre-registered `_BED_MESH_CALIBRATE` on some firmware variants). We
+# detect which name got used (prefer `_BMC_KAMP_INNER`, fall back to the
+# stock `_BED_MESH_CALIBRATE`). Without KAMP, we override BED_MESH_CALIBRATE
+# directly.
 #
 # Why the guard: Creality's master-server daemon fires raw BED_MESH_CALIBRATE
 # during print prep. Without the guard, that would run a full default mesh
@@ -20,7 +24,8 @@
 # Loaded via [restore_bed_mesh] in printer.cfg, AFTER [bed_mesh] and
 # [prtouch_v3] sections so it can override their registration.
 #
-# 2026-04-06 initial; 2026-04-20 guard added; 2026-04-20 KAMP compat.
+# 2026-04-06 initial; 2026-04-20 guard added; 2026-04-20 KAMP compat;
+# 2026-04-20 unique rename target (_BMC_KAMP_INNER) to avoid prtouch collision.
 
 import logging
 
@@ -53,13 +58,20 @@ class BedMeshOverride:
             self.upstream_cmd = cmd
 
             # KAMP detection: if a gcode_macro named BED_MESH_CALIBRATE is
-            # registered, KAMP's wrapper is installed. KAMP's rename_existing
-            # has already moved the original handler to _BED_MESH_CALIBRATE
-            # at config-load. Override THAT so KAMP stays the entry point.
+            # registered, KAMP's wrapper is installed. KAMP-K2's installer
+            # rewrites KAMP's rename_existing target to `_BMC_KAMP_INNER`
+            # (avoids colliding with Creality's pre-registered
+            # `_BED_MESH_CALIBRATE` on some firmware variants). Fall back to
+            # the stock name for people who installed the cfg by hand.
             kamp_macro = self.printer.lookup_object(
                 'gcode_macro BED_MESH_CALIBRATE', None)
             if kamp_macro is not None:
-                target = '_BED_MESH_CALIBRATE'
+                all_cmds = set(getattr(gcode, 'ready_gcode_handlers', {}).keys())
+                all_cmds.update(getattr(gcode, 'base_gcode_handlers', {}).keys())
+                if '_BMC_KAMP_INNER' in all_cmds:
+                    target = '_BMC_KAMP_INNER'
+                else:
+                    target = '_BED_MESH_CALIBRATE'
                 mode = 'KAMP'
             else:
                 target = 'BED_MESH_CALIBRATE'

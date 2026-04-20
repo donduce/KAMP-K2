@@ -285,6 +285,40 @@ class Installer:
             self.copy_file(local, remote, mode)
             self.log(f"  {local_rel} -> {remote}", "ok")
 
+    def fix_adaptive_meshing_rename(self) -> None:
+        """Patch KAMP's Adaptive_Meshing.cfg to use a unique rename target.
+
+        Upstream KAMP uses `rename_existing: _BED_MESH_CALIBRATE`. On some
+        Creality K2 firmware variants, `_BED_MESH_CALIBRATE` is already
+        registered by `prtouch_v3_wrapper.so` at config load, which causes
+        KAMP's rename to fail with `gcode command _BED_MESH_CALIBRATE already
+        registered` when Klipper parses the macro section.
+
+        Fix: rename KAMP's inner target to `_BMC_KAMP_INNER` — unlikely to
+        collide with anything Creality registers. Also updates the call-
+        through at the end of the macro. restore_bed_mesh.py knows to
+        override this new name in KAMP mode.
+        """
+        path = "/mnt/UDISK/printer_data/config/KAMP/Adaptive_Meshing.cfg"
+        src = self.read_remote(path)
+        if "_BMC_KAMP_INNER" in src:
+            self.log("Adaptive_Meshing.cfg: already patched, skipping", "ok")
+            return
+        new_src = src.replace(
+            "rename_existing: _BED_MESH_CALIBRATE",
+            "rename_existing: _BMC_KAMP_INNER",
+        ).replace(
+            "_BED_MESH_CALIBRATE mesh_min=",
+            "_BMC_KAMP_INNER mesh_min=",
+        )
+        if new_src == src:
+            self.log("Adaptive_Meshing.cfg: rename_existing target not found "
+                     "(KAMP upstream format changed?)", "warn")
+            return
+        self.write_remote(path, new_src)
+        self.log("Adaptive_Meshing.cfg: rename target -> _BMC_KAMP_INNER "
+                 "(avoids collision with prtouch_v3)", "ok")
+
     def fix_kamp_settings(self) -> None:
         """KAMP's distributed KAMP_Settings.cfg uses `./KAMP/...` paths that
         break when placed in a KAMP/ subdirectory. Fix paths + uncomment the
@@ -632,6 +666,7 @@ def main() -> None:
 
         inst.log("=== Config patches ===", "step")
         inst.fix_kamp_settings()
+        inst.fix_adaptive_meshing_rename()
         inst.patch_printer_cfg()
         inst.patch_gcode_macro()
 
