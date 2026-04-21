@@ -25,7 +25,12 @@
 # [prtouch_v3] sections so it can override their registration.
 #
 # 2026-04-06 initial; 2026-04-20 guard added; 2026-04-20 KAMP compat;
-# 2026-04-20 unique rename target (_BMC_KAMP_INNER) to avoid prtouch collision.
+# 2026-04-20 unique rename target (_BMC_KAMP_INNER) to avoid prtouch collision;
+# 2026-04-21 bypass prtouch subclass override (IndexError at wrapper:1922 on
+# K2 Plus/F008): call upstream BedMeshCalibrate.cmd_BED_MESH_CALIBRATE as an
+# unbound class method on the bmc instance, so Creality's subclass override
+# (where present) is skipped. Fixes IndexError when KAMP passes MESH_MIN/MAX
+# to a `bmc` whose concrete class is Creality's PRTouch BedMeshCalibrate.
 
 import logging
 
@@ -46,16 +51,38 @@ class BedMeshOverride:
                 logging.error(
                     "bed_mesh_override: bed_mesh.bmc not found, abort")
                 return
-            cmd = getattr(bmc, 'cmd_BED_MESH_CALIBRATE', None)
-            help_text = getattr(
-                bmc, 'cmd_BED_MESH_CALIBRATE_help',
-                "Perform Mesh Bed Leveling")
-            if cmd is None:
+            # Grab upstream's cmd_BED_MESH_CALIBRATE as an unbound class method.
+            # Why: on K2 Plus (F008) Creality's prtouch_v3_wrapper replaces
+            # `bed_mesh.bmc` with a subclass that overrides cmd_BED_MESH_CALIBRATE
+            # with a broken regional-parse path (crashes `IndexError: list index
+            # out of range` at prtouch_v3_wrapper.py:1922 when called with
+            # MESH_MIN/MESH_MAX but no GCODE_FILE — which is exactly how KAMP
+            # calls it). Fetching the method from `bmc` (instance-level lookup)
+            # would return the subclass override; fetching from the upstream
+            # class bypasses it. Bound to the existing bmc instance via __get__
+            # so the method sees the printer's actual bed_mesh state.
+            try:
+                from extras.bed_mesh import BedMeshCalibrate as _UpstreamBMC
+            except ImportError as e:
                 logging.error(
-                    "bed_mesh_override: cmd_BED_MESH_CALIBRATE not found, "
-                    "abort")
+                    "bed_mesh_override: cannot import upstream "
+                    "BedMeshCalibrate: %s", e)
                 return
-            self.upstream_cmd = cmd
+            upstream_unbound = getattr(
+                _UpstreamBMC, 'cmd_BED_MESH_CALIBRATE', None)
+            if upstream_unbound is None:
+                logging.error(
+                    "bed_mesh_override: upstream BedMeshCalibrate has no "
+                    "cmd_BED_MESH_CALIBRATE, abort")
+                return
+            help_text = getattr(
+                _UpstreamBMC, 'cmd_BED_MESH_CALIBRATE_help',
+                "Perform Mesh Bed Leveling")
+            self.upstream_cmd = upstream_unbound.__get__(bmc, type(bmc))
+            logging.info(
+                "bed_mesh_override: upstream bound to %s via class "
+                "BedMeshCalibrate (bypasses any subclass override)",
+                type(bmc).__name__)
 
             # KAMP detection: if a gcode_macro named BED_MESH_CALIBRATE is
             # registered, KAMP's wrapper is installed. KAMP-K2's installer

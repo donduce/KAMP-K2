@@ -10,26 +10,32 @@ Usage:
     python install_k2.py --host 192.168.3.57 --password MYPASS
     python install_k2.py --host 192.168.3.57 --dry-run
     python install_k2.py --host 192.168.3.57 --revert
+    python install_k2.py --host 192.168.3.57 --board F008  # force K2 Plus path
 
 Defaults:
     user=root, password=creality_2024 (Creality stock credential)
+    board=auto (detects from printer.cfg header + [z_tilt]/[stepper_z1])
 
 What this does:
-    1. Copies extras/restore_bed_mesh.py -> /usr/share/klipper/klippy/extras/
-    2. Copies Configuration/{KAMP_Settings,Adaptive_Meshing,Line_Purge}.cfg
+    1. Detects board (F021 = K2/Combo/Pro single-Z, F008 = K2 Plus dual-Z).
+    2. Copies extras/restore_bed_mesh.py -> /usr/share/klipper/klippy/extras/
+    3. Copies Configuration/{KAMP_Settings,Adaptive_Meshing,Line_Purge}.cfg
        -> /mnt/UDISK/printer_data/config/KAMP/
-    3. Fixes KAMP_Settings.cfg include paths (relative to file, not config root).
-    4. Uncomments Adaptive_Meshing + Line_Purge in KAMP_Settings.cfg.
-    5. Adds `[include KAMP/KAMP_Settings.cfg]` and `[restore_bed_mesh]` to
+    4. Fixes KAMP_Settings.cfg include paths (relative to file, not config root).
+    5. Uncomments Adaptive_Meshing + Line_Purge in KAMP_Settings.cfg.
+    6. Adds `[include KAMP/KAMP_Settings.cfg]` and `[restore_bed_mesh]` to
        printer.cfg (if absent).
-    6. Hijacks `[gcode_macro G29]` and `[gcode_macro BED_MESH_CALIBRATE_START_PRINT]`
+    7. F008 only: flips `forced_leveling: true` -> `false` in [virtual_sdcard]
+       to stop master-server from setting the bed_mesh_calibate_state flag
+       that collides with upstream Klipper bed_mesh via our override.
+    8. Hijacks `[gcode_macro G29]` and `[gcode_macro BED_MESH_CALIBRATE_START_PRINT]`
        to no-op handshake macros (master-server compatibility).
-    7. Inserts a bare `BED_MESH_CALIBRATE` call (KAMP picks it up) and
+    9. Inserts a bare `BED_MESH_CALIBRATE` call (KAMP picks it up) and
        `LINE_PURGE` call into `[gcode_macro START_PRINT]`.
-    8. Backs up originals to /mnt/exUDISK/.system/kamp_k2_backup_<timestamp>/
+   10. Backs up originals to /mnt/exUDISK/.system/kamp_k2_backup_<timestamp>/
        (firmware-update-survivable) if the SSD is present, else to
        /mnt/UDISK/printer_data/config/backups/.
-    9. Restarts Klippy and checks the log for the expected "KAMP mode" message.
+   11. Restarts Klippy and checks the log for the expected "KAMP mode" message.
 
 Requires: paramiko (`pip install paramiko`).
 """
@@ -117,12 +123,14 @@ LINE_PURGE_LINE = "  # KAMP-K2: adaptive purge line at print-area edge\n  LINE_P
 
 class Installer:
     def __init__(self, host: str, user: str, password: str,
-                 dry_run: bool = False, verbose: bool = False) -> None:
+                 dry_run: bool = False, verbose: bool = False,
+                 board: str = "auto") -> None:
         self.host = host
         self.user = user
         self.password = password
         self.dry_run = dry_run
         self.verbose = verbose
+        self.board = board  # "auto" | "F008" | "F021"
         self.ssh: paramiko.SSHClient | None = None
         self.changes_made: list[str] = []
 
@@ -254,6 +262,40 @@ class Installer:
         cfg = self.read_remote(PRINTER_CFG)
         return re.search(r"^\[exclude_object\]", cfg, re.MULTILINE) is not None
 
+    def detect_board(self) -> str:
+        """Return "F008" (K2 Plus dual-Z) or "F021" (K2/Combo/Pro single-Z).
+
+        Detection order:
+          1. Honour --board override if not "auto".
+          2. Parse the `# F008` / `# F021` header comment Creality emits at
+             the top of printer.cfg.
+          3. Fall back to structural markers: [stepper_z1] + [z_tilt] => F008.
+          4. Default to F021 if ambiguous and log a warning.
+        """
+        if self.board != "auto":
+            self.log(f"Board override: {self.board}", "ok")
+            return self.board
+
+        cfg = self.read_remote(PRINTER_CFG)
+        header = cfg[:500]
+        if re.search(r"^#\s*F008\b", header, re.MULTILINE):
+            self.log("Board detected: F008 (K2 Plus, dual-Z)", "ok")
+            return "F008"
+        if re.search(r"^#\s*F021\b", header, re.MULTILINE):
+            self.log("Board detected: F021 (K2 / K2 Combo / K2 Pro, single-Z)",
+                     "ok")
+            return "F021"
+        has_z1 = re.search(r"^\[stepper_z1\]", cfg, re.MULTILINE) is not None
+        has_tilt = re.search(r"^\[z_tilt\]", cfg, re.MULTILINE) is not None
+        if has_z1 and has_tilt:
+            self.log("Board detected via [stepper_z1]+[z_tilt]: F008 (K2 Plus)",
+                     "ok")
+            return "F008"
+        self.log("Board could not be determined from printer.cfg header or "
+                 "config sections. Defaulting to F021. Pass --board F008 if "
+                 "this is a K2 Plus.", "warn")
+        return "F021"
+
     # ---- install steps ----
     def backup_configs(self) -> None:
         # Prefer SSD if available (firmware-update survivable)
@@ -336,6 +378,52 @@ class Installer:
                           "[include Line_Purge.cfg]")
         self.write_remote(path, src)
         self.log("KAMP_Settings.cfg: include paths fixed, adaptive+purge enabled", "ok")
+
+    def patch_forced_leveling_f008(self) -> None:
+        """F008 (K2 Plus) only: flip `forced_leveling: true` -> `false`.
+
+        Why: with forced_leveling=true, master-server sets the shared
+        `bed_mesh_calibate_state` flag (visible in log format string
+        `bed_mesh_calibate_state = %d, forced_leveling = %d` from
+        Control/AppModeSdPrint.c:965) to a value that routes the wrapper's
+        probe endstop into its own adaptive-region path. That path depends
+        on state set up by the wrapper's own `cmd_BED_MESH_CALIBRATE`, which
+        our `restore_bed_mesh.py` has unregistered in favour of upstream
+        Klipper bed_mesh. Upstream bed_mesh calls `multi_probe_begin` on
+        the endstop, endstop reads `bed_mesh_calibate_state`, finds it in a
+        state expecting a gcode file that was never handed to upstream,
+        raises PR_ERR_CODE_REGION_G29, Klipper shuts down.
+
+        Flipping forced_leveling to false stops master-server from entering
+        that branch at all. The wrapper's probe endstop takes the default
+        (non-region) path, which upstream bed_mesh drives correctly.
+
+        Safe because our override replaces Creality's adaptive flow entirely
+        — there is nothing left that forced_leveling=true would enable that
+        we still want.
+        """
+        cfg = self.read_remote(PRINTER_CFG)
+        m = re.search(
+            r"^(\s*)forced_leveling\s*:\s*true\b",
+            cfg, re.MULTILINE | re.IGNORECASE,
+        )
+        if not m:
+            self.log("forced_leveling: true not present (already false or "
+                     "absent) — nothing to patch", "ok")
+            return
+        new_cfg = re.sub(
+            r"^(\s*)forced_leveling\s*:\s*true\b",
+            r"\1forced_leveling: false  # patched by KAMP-K2 "
+            "(was true; conflicts with upstream bed_mesh override on F008)",
+            cfg, count=1, flags=re.MULTILINE | re.IGNORECASE,
+        )
+        if new_cfg == cfg:
+            self.log("forced_leveling patch produced no change (regex miss)",
+                     "warn")
+            return
+        self.write_remote(PRINTER_CFG, new_cfg)
+        self.log("printer.cfg: forced_leveling set to false for F008 "
+                 "(was true; restored on revert via backup)", "ok")
 
     def patch_printer_cfg(self) -> None:
         cfg = self.read_remote(PRINTER_CFG)
@@ -640,10 +728,16 @@ def main() -> None:
                     help="Restore the most recent kamp_k2_backup and remove "
                          "all KAMP-K2 installed files, returning the printer "
                          "to its pre-install state.")
+    ap.add_argument("--board", choices=["auto", "F008", "F021"], default="auto",
+                    help="Board variant override. auto (default) detects from "
+                         "printer.cfg. F008 = K2 Plus (dual-Z, needs "
+                         "forced_leveling patch). F021 = K2 / K2 Combo / K2 "
+                         "Pro (single-Z, no forced_leveling patch).")
     args = ap.parse_args()
 
     inst = Installer(args.host, args.user, args.password,
-                     dry_run=args.dry_run, verbose=args.verbose)
+                     dry_run=args.dry_run, verbose=args.verbose,
+                     board=args.board)
     try:
         inst.connect()
 
@@ -658,6 +752,9 @@ def main() -> None:
                      "adaptive meshing needs it. Aborting.", "err")
             sys.exit(1)
 
+        inst.log("=== Board detection ===", "step")
+        board = inst.detect_board()
+
         inst.log("=== Backup ===", "step")
         inst.backup_configs()
 
@@ -668,6 +765,8 @@ def main() -> None:
         inst.fix_kamp_settings()
         inst.fix_adaptive_meshing_rename()
         inst.patch_printer_cfg()
+        if board == "F008":
+            inst.patch_forced_leveling_f008()
         inst.patch_gcode_macro()
 
         inst.log("=== Verify ===", "step")
