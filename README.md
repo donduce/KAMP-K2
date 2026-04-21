@@ -1,239 +1,147 @@
+# KAMP-K2
 
-<h1 align="center">
-  <br>
-  <img src="./Photos/Logo/KAMP-Logo.png" width="260"></a>
-  <br>
-    Klipper Adaptive Meshing & Purging
-  <br>
-</h1>
-
-<h4 align="center"> Your 3D printer just got a whole lot smarter!</h4>
-    <br>
-<p align="center">
-<img src="./Photos/Badges/built-for-klipper-made-with-love.svg" width="400">
-</p>
-
-<p align="center">
-  <a href="#key-features">Key Features</a> •
-  <a href="#requirements">Requirements</a> •
-  <a href="#installation">Installation</a> •
-  <a href="#adaptive-meshing">Adaptive Meshing</a> •
-  <a href="#adaptive-purging">Adaptive Purging</a> •
-  <a href="#troubleshooting">Troubleshooting</a> •
-  <a href="#credits">Credits</a>
-</p>
-
-<p align="center">
-<img src="./Photos/Meshing-Assets/adaptive_benchy_glow.gif" width=300>
-
-## Key Features:
-
-* No wasted probe information
-  - KAMP will generate a mesh **only** in the area you actually need it: Where you're printing!
-  - Since the mesh area will be smaller, the mesh can be much more dense. Imagine making a 3x3 mesh, but the size of a [3DBenchy](https://www.3dbenchy.com)!
-
-* Compatibility
-  - If you've got a 3D printer running Klipper and a probe, KAMP is ready to serve you.
-  - We've seen users have success with inductive probes, [Klicky](https://github.com/jlas1/Klicky-Probe), [Euclid](https://github.com/nionio6915/Euclid_Probe), BLTouch, and [Voron Tap](https://github.com/VoronDesign/Voron-Tap)
-  
-    >**Note:**
-    >KAMP  has the option to fuzz mesh points, which helps to spread out wear from nozzle-based probing.
-* Straightforward setup
-  - One of the main goals of KAMP was to be as easy to implement as possible. Just `[include]` a few files, and you're ready to go!
+**KAMP (Klipper Adaptive Meshing & Purging) — Creality K2 fork**
 
+A fork of [kyleisah/Klipper-Adaptive-Meshing-Purging](https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging) with the small amount of extra glue Creality K2 printers need to make KAMP actually work.
 
-* No parameter passing
-  - KAMP uses information from [[exclude_object]](https://www.klipper3d.org/Exclude_Object.html#exclude-objects) to define mesh bounds. Complicated slicer parameter passing is finally a thing of the past. Welcome to the future!
+> Looking for upstream KAMP's own readme? It's preserved as [`README_KAMP_UPSTREAM.md`](README_KAMP_UPSTREAM.md).
 
-* [Adaptive Purging](#adaptive-purging) 
-  - Allows you to purge right next to the print area. We don't believe in boring purges, we like to sign our work with purge logos! We also have provisions for [more simplistic]() purges as well.
+## What's different from upstream KAMP
 
-<p align="center">
-<img src="./Photos/Purging-Assets/voron-purge-example.png" width="375" >
-</p>
+Creality's K2 firmware does two things that break upstream KAMP out of the box (on the `CR0CN200400C10` board — K2, K2 Combo, K2 Pro). K2 Plus has a half-implemented Creality adaptive mesh on a different board but users report it's unreliable; this fork replaces that too.
 
-<p align="center">
-    <b>
-        Adaptive Voron Logo Purge
-    </b>
-</p>
+1. **`prtouch_v3_wrapper.so` hijacks `BED_MESH_CALIBRATE`** with a non-adaptive implementation that ignores `MESH_MIN` / `MESH_MAX` / `PROBE_COUNT` and crashes with `IndexError` when those are passed. KAMP relies on the upstream Klipper handler being present, so KAMP calls fail silently or blow up.
+2. **`master-server` daemon independently fires `G29` and `BED_MESH_CALIBRATE_START_PRINT`** during print prep, outside of any slicer start-gcode. Those fire before KAMP can run and triggers a stock full-bed mesh every time.
 
-## Requirements:
+KAMP-K2 fixes both:
 
-1. You will need `[exclude_object]` defined in `printer.cfg`.
+- **`extras/restore_bed_mesh.py`** — a small Klipper extras module that re-registers the upstream `bed_mesh.BedMeshCalibrate.cmd_BED_MESH_CALIBRATE` handler, wrapping it with a guard that requires `MESH_MIN` / `MESH_MAX` bounds to run. Bare calls (from master-server) are no-ops. KAMP-aware: detects KAMP's `rename_existing: _BED_MESH_CALIBRATE` and overrides the inner handler so KAMP stays the user-facing entry point.
+- **Macro hijacks**: `G29` and `BED_MESH_CALIBRATE_START_PRINT` are replaced with no-op macros that emit a fake `[G29_TIME]Execution time: 0.0` response so master-server's print-prep sequence is satisfied without actually running a mesh. The real mesh runs inside `START_PRINT` where KAMP has slicer metadata available.
+- **`START_PRINT` patches**: a call to bare `BED_MESH_CALIBRATE` (which KAMP wraps with adaptive bounds) and a `LINE_PURGE` call are inserted in the right places relative to the K2's CFS-specific nozzle clean and prime moves.
 
-2. You will also need to make sure the following is defined in `moonraker.conf`:
-  
-    ```yaml
-    [file_manager]
-    enable_object_processing: True
+Upstream KAMP's `Adaptive_Meshing.cfg`, `Line_Purge.cfg`, and `KAMP_Settings.cfg` are included unchanged — this fork only *adds* files, never modifies KAMP's own behaviour.
 
-    ```
-3. Finally, you will need to make sure your slicer is labeling objects:
+## Quick start
 
-<p align="center">
-<img src="./Photos/Meshing-Assets/slicer-setting.png" width="500">
-</p>
+### Windows (one-liner, no git needed)
 
-<p align="center">
-If you've got all that, you're ready for KAMP!
-</p>
+Open **PowerShell** (not cmd.exe) and paste:
 
-## Installation:
+```powershell
+iwr -useb https://raw.githubusercontent.com/grant0013/KAMP-K2/main/install.ps1 | iex
+```
 
-The cleanest and easiest way to get started with KAMP is to use Moonraker's Update Manager utility. This will allow you to easily install and helps to provide future updates when more features are rolled out!
+The script checks for Python (prompts to install if missing), downloads the repo, installs `paramiko`, asks for your printer's IP, and runs the installer. No manual SSH required.
 
-1. `ssh` into your Klipper device and execute the following commands:
-   ```bash
-    cd
-    
-    git clone https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging.git
-    
-    ln -s ~/Klipper-Adaptive-Meshing-Purging/Configuration printer_data/config/KAMP
+### macOS / Linux / manual
 
-    cp ~/Klipper-Adaptive-Meshing-Purging/Configuration/KAMP_Settings.cfg ~/printer_data/config/KAMP_Settings.cfg
-    ```
-    > **Note:**
-    > This will change to the home directory, clone the KAMP repo, create a symbolic link of the repo to your printer's config folder, and create a copy of `KAMP_Settings.cfg` in your config directory, ready to edit.
-    > 
-    > It is also possible that with older setups of klipper or moonraker that your config path will be different. Be sure to use the correct config path for your machine when making the symbolic link, and when copying `KAMP_Settings.cfg` to your config directory.
+```sh
+git clone https://github.com/grant0013/KAMP-K2
+cd KAMP-K2
+pip install paramiko
+python install_k2.py --host 192.168.x.x
+```
 
-2. Open your `moonraker.conf` file and add this configuration:
-   ```yaml
-   [update_manager Klipper-Adaptive-Meshing-Purging]
-   type: git_repo
-   channel: dev
-   path: ~/Klipper-Adaptive-Meshing-Purging
-   origin: https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging.git
-   managed_services: klipper
-   primary_branch: main
-    ```
+Replace `192.168.x.x` with your printer's IP. The installer uses the Creality stock root password (`creality_2024`) by default; override with `--password MYPASS` if yours has been changed.
 
-    > **Note:**
-    > Whenever Moonraker configurations are changed, it must be restarted for changes to take effect. If you do not want moonraker to notify you of future updates to KAMP, feel free to skip this.
+See [`docs/INSTALL_K2.md`](docs/INSTALL_K2.md) for the step-by-step the installer performs (useful if you want to do it manually, or understand what's being changed).
 
-3. Depending on what features you want from KAMP, you'll need to `[include]` some files in `KAMP_Settings.cfg`:
+## Compatibility
 
-<p align="center">
-<img src="./Photos/Include-Tutorial.gif">
-</p>
+Two different boards in the K2 family behave differently:
 
-  >**Note:**
-  > The KAMP configuration files are broken up like this to allow those who do not use bed probes to benefit from adaptive purging, and other features.
+| Printer | Board | Stock adaptive mesh? | KAMP-K2 needed? |
+|---|---|---|---|
+| **K2 / K2 Combo / K2 Pro** | `CR0CN200400C10` (F021) | **No** (no `forced_leveling` toggle in printer.cfg, wrapper doesn't support adaptive bounds) | **Yes — this is the only option** |
+| **K2 Plus** | `CR0CN240319C13` (F008) | Yes, but **off by default** and forum-reported unreliable | Optional alternative; more maintainable than Creality's flaky toggle |
+| K1 / K1C / K1 Max | CR4CU220812S* | No | Should work (same `prtouch_v3_wrapper` + master-server architecture); untested — please file an issue if you try it |
+| K1 SE | CR4CU220812S12 | No | Unknown (wrapper may be `prtouch_v2`; minor path change in installer probably needed) |
+| Non-Creality Klipper printer | — | — | **Don't use this fork** — use [upstream KAMP](https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging) directly; you don't have a wrapper to bypass |
 
-4. After you `[include]` the features you want, be sure to restart your firmware so those inclusions take effect. Don't forget to add `[include KAMP_Settings.cfg]` to your `printer.cfg`!
+**Adaptive line purging (`LINE_PURGE`) is *not* available in any Creality K-series stock firmware.** Even K2 Plus owners with Creality's built-in adaptive mesh working get no purge-line adaptation out of the box. KAMP-K2 brings both features on every variant it supports.
 
+Tested on my K2 Combo (`CR0CN200400C10`, firmware `V1.1.4.1`, Klipper `09faed31-dirty`).
 
-## How to use `KAMP_Settings.cfg`:
-<br>
+## Slicer setup
 
-  >**Note:**
-  For ease of use and understanding, all KAMP configuration is contained inside of `KAMP_Settings.cfg`. Any changes you wish to make to KAMP specifically can be found here.
+### OrcaSlicer
 
-<br>
+**Printer Settings → Machine G-code → Machine start G-code**:
 
-## Adaptive Meshing:
+```
+START_PRINT EXTRUDER_TEMP=[nozzle_temperature_initial_layer] BED_TEMP=[bed_temperature_initial_layer_single]
+T[initial_no_support_extruder]
+M204 S2000
+M83
+```
 
-* Mesh generation and adjustment:
+**Print Settings → Others → Bed mesh** (match your `[bed_mesh]` section in printer.cfg):
+- Bed mesh min: `5, 5`
+- Bed mesh max: `255, 255` on K2/K2 Combo (260³), or `345, 345` on K2 Plus (350³) — read the `mesh_max:` line in your printer.cfg to be sure
+- Probe point distance: `50, 50`
+- Mesh margin: `5`
 
-  * These variables affect how KAMP creates meshes:
+**Print Settings → Others → Output options**: make sure **Label objects** is enabled (this writes the `EXCLUDE_OBJECT_DEFINE` lines that KAMP reads).
 
-    * `mesh_margin:` This is the amount of space in millimeters **beyond** your print area to further increase the size of the adapted mesh. Rather than a mesh starting at `X50 Y50`, if `Mesh_Margin` is set to `10`, the mesh will be stretched, and the new mesh bounds will start at `X40 Y40` instead. This can be useful for those who commonly use brims when printing. By default, this value is 0.
+**You do NOT need to pass `MESH_MIN` / `MESH_MAX` / `PROBE_COUNT`** — KAMP figures them out from the loaded gcode's `exclude_object` metadata.
 
-    * `fuzz_amount:` This is the **maximum** amount that the mesh bounds can be increased in millimeters *by random*. This setting is really only intended for those who use a nozzle-based probe like a strain gauge or Voron Tap. This will slightly randomize the bounds of the bed mesh which will help to spread out wear on your print surface when printing multiples of the same print job (several plates of similar size). By default, this value is 0. **Maximum** `fuzz_amount` recommended is `3`.
+To skip the adaptive mesh entirely on a specific slice (e.g. a calibration cube you don't care about), add `MESH=0` to the `START_PRINT` call:
 
-<br>
+```
+START_PRINT EXTRUDER_TEMP=[...] BED_TEMP=[...] MESH=0
+```
 
-* Using a probe that is not integrated into the printhead (Klicky, Euclid, etc)
-  
-  * Usually have special macros that are used to attach and detach the probe specifically for mesh leveling. **Those need to be removed/uncommented from your config or they will cause issues.** We will instead call the docking/undocking macros inside of KAMP.
+### Other slicers
 
-    * `probe_dock_enable:` By default, this setting is `False`. Set this to `True` if your machine has a probe that needs to be attached with a special macro before probing the bed.
+Any slicer that supports `[exclude_object]` / object-labeled gcode output will work. PrusaSlicer and SuperSlicer both do. The only requirement is that the `EXCLUDE_OBJECT_DEFINE` lines appear in the file **before** the `START_PRINT` call, so `printer.exclude_object.objects` is populated by the time KAMP reads it. OrcaSlicer does this by default; other slicers vary.
 
-    * `attach_macro:` Define the macro that your machine uses to attach the probe here.
+## Verifying it worked
 
-    * `detach_macro:` Define the macro that your machine uses to detach the probe here.
+After running the installer, open your printer's gcode console and slice a small test print. You should see something like:
 
-## Adaptive Purging:
+```
+// Algorithm: bicubic.
+// Default probe count: 11,11.
+// Adapted probe count: 4,4.
+// Default mesh bounds: (5, 5), (255, 255).
+// Adapted mesh bounds: (106.0, 39.0), (154.0, 221.0).
+// KAMP adjustments successful. Happy KAMPing!
+// KAMP purge starting at 115.0, 29.0 and purging 30.0mm of filament, requested flow rate is 12.0mm3/s.
+```
 
-* These settings directly affect how KAMP handles it's purge routines and placement:
+The probe should then walk only the area covering your printed objects.
 
-  * `purge_height:` This is the height above the bed that the nozzle will be when KAMP does it's purge. This should not need much adjustment, unless you are using a nozzle with a large diameter, or purging a very small amount. The default for this value is `0.8`.
-  
-  * `tip_distance:` This is the distance that the very tip of your loaded filament is away from the opening of your nozzle. It's a good idea to tune this value so your purge is nice and consistent, rather than spotty or blown out at the beginning. It's a good idea to set this value to be a little bit less than the final retract that happens in your `Print_End` macro.
+In `klippy.log`, the override should announce itself on every Klippy restart:
 
-<p align="center">
-<img src="./Photos/Purging-Assets/tip-distance.png" height="350" >
-</p>
+```
+[INFO] bed_mesh_override: _BED_MESH_CALIBRATE re-registered to guarded upstream
+       (KAMP mode; bare calls are no-ops; MESH_MIN/MAX required to run)
+```
 
-  * `purge_margin:` This is the amount of space you wish to have between your purge, and your actual print area. Helpful for those who print using brims or skirts, or have a printhead with ducts that are very close to the bed during the first few layers of a print. By default, this value is `10` as a healthy, but conservative buffer.
+## What about Smart_Park?
 
-  * `purge_amount:` This is the amount in millimeters of filament material you wish to purge prior to a print beginning. Some users prefer only to purge enough to get the nozzle ready, and some users prefer to purge enough to change a filament color before a print. After some testing, the default amount to purge is `30` millimeters of material.
+KAMP-K2 **does not enable** upstream KAMP's `Smart_Park.cfg`. The K2 has its own `BOX_GO_TO_EXTRUDE_POS` macro (part of the CFS filament-change flow) that already parks the nozzle at a reasonable location during print prep. Adding Smart_Park on top would just override that with a parking location near the first layer — which the printer was about to move to anyway. If you have a strong reason to enable it, uncomment the line in `KAMP_Settings.cfg` by hand after install.
 
-  * `flow_rate:` This is the desired flow rate you wish to purge at. You should set this value to be close to the flow limit of your hotend. Standard flow hotends like MicroSwiss, Dragonfly, or Revo should be around `12` or so, while higher flow hotends, like the Rapido or Dragon, should be set somewhere around `20`.
+## Reverting
 
-  >**Note:**
-It is required to add `max_extrude_cross_section: 5` to your `[extruder]` config to allow effective purging to be possible. KAMP will warn you if you forget to set this value, and skip the purge so the printer will not be halted. It is also recommended to set up [firmware_retraction](https://www.klipper3d.org/Config_Reference.html?h=retract#firmware_retraction) inside of klipper so KAMP can use the correct retraction settings for your machine. If this is not found, KAMP will warn you, and use reasonable direct-drive extruder values to complete the purge.
+Run the installer with `--revert` (not yet implemented — see Issues) or restore the backup that the installer makes at:
 
-## Smart Park:
+- `/mnt/exUDISK/.system/kamp_k2_backup_<timestamp>/` (on printers with the external SSD), or
+- `/mnt/UDISK/printer_data/config/backups/kamp_k2_<timestamp>/` (without SSD)
 
-* These settings are used for adjusting KAMP's Smart Park function, which is helpful to move the printhead near the print area to do your final heating.
+Then remove `extras/restore_bed_mesh.py`, remove `[restore_bed_mesh]` and `[include KAMP/KAMP_Settings.cfg]` from `printer.cfg`, and restart Klippy.
 
-  * `smart_park_height:` This is the height at which you'd like your printhead to be when calling the `Smart_Park` macro. **Don't forget to add `Smart_Park` near the end of your `Print_Start` macro, *before* the final heating command is called.**
+## How it works (deeper)
 
-## Troubleshooting:
+- [`docs/how-it-works.md`](docs/how-it-works.md) — the full hijack stack and why each piece is needed
 
-<details>
-    <summary>
-        <b>
-        No matter what, meshes and purges are not adapting!
-        </b>
-    </summary>
-<p>
-</p>
-This happens when Moonraker's object processor is putting exclude object definitions in the wrong spot (AFTER Print_Start rather than before). This is usually fixed if you add M117 before your print_start macro in your slicer's starting gcode. M117 is just a basic "clear display" gcode, but will force the preprocessor to place the definition macros in the correct spot.
-</details>
+## Credits
 
-<details>
-    <summary>
-        <b>
-        I'm getting 'gcode_macro BED_MESH_CALIBRATE:gcode': TypeError: bad operand type for abs(): 'Undefined'
-        </b>
-    </summary>
-<p>
-</p>
-This was likely caused by you commenting out a setting in KAMP_Settings.cfg rather than just setting it to false. These checks needs to be in place, so instead of commenting them out, just set them to disabled.
-</details>
+Built on top of:
+- [Klipper](https://www.klipper3d.org/) — Kevin O'Connor and contributors
+- [kyleisah/Klipper-Adaptive-Meshing-Purging](https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging) — the upstream KAMP project, unchanged in this fork
+- [pellcorp/creality](https://github.com/pellcorp/creality) — early K1 / K2 reverse-engineering groundwork
 
-<details>
-  <summary>
-    <b>
-      Purging is not working!
-    </b>
-  </summary>
-  <p>
-  </p>
-  You need to call the purging macros ( LINE_PURGE or VORON_PURGE ) either in your slicer start gcode, or as part of your PRINT_START macro. Be sure to place these macros at the end, so it is called right before the print starts, and the nozzle has been fully heated.
-</details>
+## Licence
 
-## Credits:
-
-KAMP was not a one man effort, it was made possible with help from fine folks such as:
-- [MapleLeafMakers](https://github.com/MapleLeafMakers) - for assisting in the inception of this project.
-- [Julian Schill](https://github.com/julianschill) - A true code warrior and jinja ninja.
-- [frank.af](https://github.com/kageurufu) - For spearheading object cancellation in Klipper, and helping make this possible.
-- [Le0n](https://github.com/leanghoun) - For the fantastic KAMP artwork.
-- [Yenda](https://github.com/jtrmal) - For bringing KAMP into the realm of Moonraker's Update Manager.
-
-- [You](https://en.wikipedia.org/wiki/You) - For the continued support and sharing KAMP with your friends. :smiling_face_with_three_hearts:
-
-## You may also like...
-
-- [Ellis' Print-Tuning Guide](https://ellis3dp.com/Print-Tuning-Guide/) - A guide for tuning your 3D printer to *perfection*.
-- [Jontek2's Print_Start Guide](https://github.com/jontek2/A-better-print_start-macro) - A fantastic `Print_Start` guide for Voron printers.
-- [Takuya's Tools](http://tools.takuya.wtf/index.html) A collection of handy tools for any Klipper user.
-
----
-
-
-
+GPL v3, matching upstream KAMP and Klipper. See [`LICENSE.md`](LICENSE.md).
