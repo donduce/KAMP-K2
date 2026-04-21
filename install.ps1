@@ -166,30 +166,46 @@ function Download-Repo {
     $tmpZip = Join-Path $env:TEMP "KAMP-K2-main.zip"
     Invoke-WebRequest -Uri $RepoZipUrl -OutFile $tmpZip -UseBasicParsing -ErrorAction Stop
 
-    if (Test-Path $InstallDir) {
-        Write-Step "Removing previous install at $InstallDir..."
-        # Preserve the backups directory across repo re-downloads.
-        $preservedBackups = $null
-        if (Test-Path $BackupDir) {
-            $preservedBackups = Join-Path $env:TEMP "KAMP-K2-backups-preserve"
-            if (Test-Path $preservedBackups) {
-                Remove-Item -Recurse -Force $preservedBackups -ErrorAction Stop
-            }
-            Move-Item $BackupDir $preservedBackups -ErrorAction Stop
-        }
-        Remove-Item -Recurse -Force $InstallDir -ErrorAction Stop
-        if ($preservedBackups) {
-            New-Item -ItemType Directory -Path $BackupDir -Force -ErrorAction Stop | Out-Null
-            Move-Item (Join-Path $preservedBackups "*") $BackupDir -ErrorAction Stop
+    # 1. Preserve backups if present (outside $InstallDir, to temp).
+    #    Previously we created $InstallDir\backups mid-flow and then tried
+    #    to Move-Item the extracted zip inner folder onto $InstallDir --
+    #    PS treats that as "move INTO an existing directory" and you end
+    #    up with $InstallDir\KAMP-K2-main\ nested one level too deep, so
+    #    install_k2.py isn't where the rest of the script expects it.
+    #    Fix: preserve first, EMPTY $InstallDir, extract flat, restore
+    #    backups AFTER.
+    $preservedBackups = $null
+    if (Test-Path $BackupDir) {
+        $preservedBackups = Join-Path $env:TEMP "KAMP-K2-backups-preserve"
+        if (Test-Path $preservedBackups) {
             Remove-Item -Recurse -Force $preservedBackups -ErrorAction Stop
         }
+        Move-Item $BackupDir $preservedBackups -ErrorAction Stop
     }
+
+    # 2. Remove any previous install so $InstallDir is absent.
+    if (Test-Path $InstallDir) {
+        Write-Step "Removing previous install at $InstallDir..."
+        Remove-Item -Recurse -Force $InstallDir -ErrorAction Stop
+    }
+
+    # 3. Extract zip to a temp location, then rename the inner folder
+    #    (KAMP-K2-main) TO $InstallDir. Rename-vs-move-into works because
+    #    $InstallDir does not exist at this point.
     Write-Step "Extracting to $InstallDir..."
     $tmpExtract = Join-Path $env:TEMP "KAMP-K2-extract"
     if (Test-Path $tmpExtract) { Remove-Item -Recurse -Force $tmpExtract -ErrorAction Stop }
     Expand-Archive -Path $tmpZip -DestinationPath $tmpExtract -ErrorAction Stop
     $inner = Get-ChildItem -Path $tmpExtract | Where-Object { $_.PSIsContainer } | Select-Object -First 1
     Move-Item $inner.FullName $InstallDir -ErrorAction Stop
+
+    # 4. Restore backups into the fresh $InstallDir.
+    if ($preservedBackups) {
+        New-Item -ItemType Directory -Path $BackupDir -Force -ErrorAction Stop | Out-Null
+        Move-Item (Join-Path $preservedBackups "*") $BackupDir -ErrorAction Stop
+        Remove-Item -Recurse -Force $preservedBackups -ErrorAction Stop
+    }
+
     Remove-Item -Recurse -Force $tmpExtract, $tmpZip -ErrorAction SilentlyContinue
     Write-Ok "Repo ready at $InstallDir"
 }
