@@ -663,8 +663,34 @@ class Installer:
             )
             self.log("gcode_macro.cfg: BED_MESH_CALIBRATE_START_PRINT hijacked", "ok")
 
-        # 3. Insert KAMP mesh call + LINE_PURGE into START_PRINT if not already
-        if "KAMP-K2: adaptive mesh" not in cfg:
+        # 3. Insert KAMP mesh call + LINE_PURGE into START_PRINT if not
+        #    already.
+        #
+        # To know whether the block is "already applied" we look at the
+        # FUNCTIONAL evidence inside the [gcode_macro START_PRINT] body:
+        #   - a bare `BED_MESH_CALIBRATE` line = mesh block is in place
+        #   - a `LINE_PURGE` line = purge is in place
+        # The earlier installer shipped a different comment marker
+        # (`KAMP adaptive ...` rather than `KAMP-K2: adaptive ...`), so
+        # string-matching on our current marker reported "missing" for
+        # cfgs patched by the old version -- the installer then tried
+        # to re-insert and hit "anchor not found" because the prior
+        # patch had reshaped the surrounding text.
+        start_print_match = re.search(
+            r"^\[gcode_macro\s+START_PRINT\](.*?)(?=^\[)",
+            cfg, re.MULTILINE | re.DOTALL)
+        sp_body = start_print_match.group(1) if start_print_match else ""
+        mesh_already = bool(
+            re.search(r"^\s*BED_MESH_CALIBRATE\s*(#.*)?$",
+                      sp_body, re.MULTILINE))
+        purge_already = bool(
+            re.search(r"^\s*LINE_PURGE\s*(#.*)?$",
+                      sp_body, re.MULTILINE))
+
+        if mesh_already:
+            self.log("START_PRINT: BED_MESH_CALIBRATE call already "
+                     "present, skipping mesh block insert", "ok")
+        else:
             # Anchor: right after the prepare==0/1 if/else, before M140 S{params.BED_TEMP}
             anchor = re.compile(
                 r"(  \{% else %\}\s*\n"
@@ -683,7 +709,10 @@ class Installer:
                 self.log("START_PRINT: anchor not found, skipping mesh block "
                          "insert (manual step may be needed)", "warn")
 
-        if "KAMP-K2: adaptive purge" not in cfg:
+        if purge_already:
+            self.log("START_PRINT: LINE_PURGE call already present, "
+                     "skipping purge insert", "ok")
+        else:
             # Anchor: after BOX_NOZZLE_CLEAN, before G92 E0 ; Reset Extruder
             anchor = re.compile(
                 r"(  BOX_NOZZLE_CLEAN\n)"
@@ -691,8 +720,6 @@ class Installer:
             )
             m = anchor.search(cfg)
             if m:
-                # Only replace the LAST occurrence of BOX_NOZZLE_CLEAN before G92 E0
-                # (there are multiple BOX_NOZZLE_CLEAN in the macro)
                 cfg = anchor.sub(
                     r"\1" + LINE_PURGE_LINE + r"\2",
                     cfg, count=1,
