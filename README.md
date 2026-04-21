@@ -131,9 +131,14 @@ Run the installer with `--revert` (not yet implemented — see Issues) or restor
 
 Then remove `extras/restore_bed_mesh.py`, remove `[restore_bed_mesh]` and `[include KAMP/KAMP_Settings.cfg]` from `printer.cfg`, and restart Klippy.
 
+## Tuning
+
+If you want adaptive meshing to run fewer probe points on small parts (faster mesh time, same first-layer quality), see [`docs/tuning.md`](docs/tuning.md). Default ceiling on most K2s is `probe_count: 11,11` — the doc explains when and why dropping it to `7,7` (Creality's own default) or lower is worth doing, and when it isn't.
+
 ## How it works (deeper)
 
 - [`docs/how-it-works.md`](docs/how-it-works.md) — the full hijack stack and why each piece is needed
+- [`docs/tuning.md`](docs/tuning.md) — optional `probe_count` tuning and `MESH=0` skip-mesh flag
 
 ## Credits
 
