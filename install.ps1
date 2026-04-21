@@ -217,13 +217,31 @@ function Run-Installer($py, [string[]]$extraArgs) {
     $args += $extraArgs
     if ($DryRun) { $args += "--dry-run" }
 
-    Push-Location $InstallDir
+    # Force Python to emit UTF-8 so box-drawing chars in the installer's log
+    # prefixes (>>, --, etc.) don't get mangled by PS 5.1's cp437/cp1252
+    # default console encoding.
+    $env:PYTHONIOENCODING = "utf-8"
     try {
-        & $py @args
-        return $LASTEXITCODE
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    } catch { }
+
+    Push-Location $InstallDir
+    $rc = $null
+    try {
+        # Pipe through Out-Host so Python's stdout goes straight to the
+        # console instead of being captured into this function's output
+        # stream. If it WERE captured, PowerShell would concatenate stdout
+        # with the `return $rc` value and the caller would end up with an
+        # array like [stdout_lines..., exit_code] -- which stringifies as
+        # a jumble and $rc -eq 0 evaluates against each element, producing
+        # a spurious FAILED banner even when the real exit code was 0.
+        & $py @args 2>&1 | Out-Host
+        $rc = $LASTEXITCODE
     } finally {
         Pop-Location
     }
+    # Use Write-Output with a single scalar so the caller gets just the int.
+    return [int]$rc
 }
 
 function Detect-Install($py) {
