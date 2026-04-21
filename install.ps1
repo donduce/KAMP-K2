@@ -1,7 +1,8 @@
 # KAMP-K2 one-shot PowerShell installer.
 #
 # For non-technical users — downloads the repo, checks Python + paramiko,
-# prompts for printer IP, runs install_k2.py. No manual SSH needed.
+# prompts for printer IP, detects existing install, runs installer/revert.
+# No manual SSH needed.
 #
 # Run from PowerShell (not cmd.exe):
 #
@@ -12,7 +13,7 @@
 # Optional parameters:
 #   .\install.ps1 -Host 192.168.1.42
 #   .\install.ps1 -Host 192.168.1.42 -Password mypass
-#   .\install.ps1 -Revert
+#   .\install.ps1 -Revert              # revert without menu
 
 [CmdletBinding()]
 param(
@@ -25,8 +26,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$InstallDir = Join-Path $env:USERPROFILE "KAMP-K2"
-$RepoZipUrl = "https://github.com/grant0013/KAMP-K2/archive/refs/heads/main.zip"
+$InstallDir   = Join-Path $env:USERPROFILE "KAMP-K2"
+$BackupDir    = Join-Path $env:USERPROFILE "KAMP-K2\backups"
+$RepoZipUrl   = "https://github.com/grant0013/KAMP-K2/archive/refs/heads/main.zip"
 
 function Write-Step($msg) { Write-Host "[*] $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "[+] $msg" -ForegroundColor Green }
@@ -37,9 +39,7 @@ function Test-Python {
     foreach ($cmd in @("python", "py")) {
         try {
             $out = & $cmd --version 2>&1
-            if ($out -match "Python\s+3\.") {
-                return $cmd
-            }
+            if ($out -match "Python\s+3\.") { return $cmd }
         } catch { continue }
     }
     return $null
@@ -87,13 +87,26 @@ function Download-Repo {
 
     if (Test-Path $InstallDir) {
         Write-Step "Removing previous install at $InstallDir..."
+        # Preserve the backups directory across repo re-downloads.
+        $preservedBackups = $null
+        if (Test-Path $BackupDir) {
+            $preservedBackups = Join-Path $env:TEMP "KAMP-K2-backups-preserve"
+            if (Test-Path $preservedBackups) {
+                Remove-Item -Recurse -Force $preservedBackups
+            }
+            Move-Item $BackupDir $preservedBackups
+        }
         Remove-Item -Recurse -Force $InstallDir
+        if ($preservedBackups) {
+            New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
+            Move-Item (Join-Path $preservedBackups "*") $BackupDir
+            Remove-Item -Recurse -Force $preservedBackups
+        }
     }
     Write-Step "Extracting to $InstallDir..."
     $tmpExtract = Join-Path $env:TEMP "KAMP-K2-extract"
     if (Test-Path $tmpExtract) { Remove-Item -Recurse -Force $tmpExtract }
     Expand-Archive -Path $tmpZip -DestinationPath $tmpExtract
-    # Zip contains a KAMP-K2-main/ folder; move its contents to $InstallDir
     $inner = Get-ChildItem -Path $tmpExtract | Where-Object { $_.PSIsContainer } | Select-Object -First 1
     Move-Item $inner.FullName $InstallDir
     Remove-Item -Recurse -Force $tmpExtract, $tmpZip
@@ -113,6 +126,61 @@ function Get-PrinterHost {
     return $ip
 }
 
+function Run-Installer($py, [string[]]$extraArgs) {
+    New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
+    $args = @("install_k2.py",
+              "--host", $ip,
+              "--password", $Password,
+              "--board", $Board,
+              "--local-backup-dir", $BackupDir)
+    $args += $extraArgs
+    if ($DryRun) { $args += "--dry-run" }
+
+    Push-Location $InstallDir
+    try {
+        & $py @args
+        return $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+}
+
+function Detect-Install($py) {
+    Write-Step "Checking printer state at $ip..."
+    $detectArgs = @("install_k2.py",
+                    "--host", $ip,
+                    "--password", $Password,
+                    "--detect")
+    Push-Location $InstallDir
+    try {
+        $out = & $py @detectArgs 2>&1 | Out-String
+    } finally {
+        Pop-Location
+    }
+    $status = ($out -split "`n" | Where-Object { $_ -match "KAMPK2_STATUS=" } | Select-Object -First 1)
+    $board  = ($out -split "`n" | Where-Object { $_ -match "KAMPK2_BOARD=" }  | Select-Object -First 1)
+    if ($status -match "KAMPK2_STATUS=(\w+)") { $s = $Matches[1] } else { $s = "unknown" }
+    if ($board  -match "KAMPK2_BOARD=(\w+)")  { $b = $Matches[1] } else { $b = "unknown" }
+    return @{ Status = $s; Board = $b; RawOutput = $out }
+}
+
+function Show-Menu($detected) {
+    Write-Host ""
+    Write-Host "================================================" -ForegroundColor Cyan
+    Write-Host " KAMP-K2 is already installed on this printer." -ForegroundColor Cyan
+    Write-Host " Board detected: $($detected.Board)" -ForegroundColor Cyan
+    Write-Host "================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  [1] Update / reinstall (pulls latest from GitHub)"
+    Write-Host "  [2] Revert (restore original Creality configs, remove KAMP-K2)"
+    Write-Host "  [3] Exit without changes"
+    Write-Host ""
+    do {
+        $choice = Read-Host "Choose [1-3]"
+    } while ($choice -notin @("1", "2", "3"))
+    return $choice
+}
+
 # --- main -------------------------------------------------------------------
 
 Write-Host ""
@@ -127,25 +195,49 @@ Download-Repo
 
 $ip = Get-PrinterHost
 
-$args = @("install_k2.py", "--host", $ip, "--password", $Password, "--board", $Board)
-if ($Revert) { $args += "--revert" }
-if ($DryRun) { $args += "--dry-run" }
+# Short-circuit: explicit -Revert flag skips the menu.
+if ($Revert) {
+    Write-Step "Running revert against $ip..."
+    $rc = Run-Installer $py @("--revert")
+    exit $rc
+}
 
-Write-Host ""
-Write-Step "Running installer against $ip..."
-Write-Host ""
-
-Push-Location $InstallDir
-try {
-    & $py @args
-    $rc = $LASTEXITCODE
-} finally {
-    Pop-Location
+# Detect existing install and branch.
+$detected = Detect-Install $py
+if ($detected.Status -eq "installed") {
+    $choice = Show-Menu $detected
+    switch ($choice) {
+        "1" {
+            Write-Step "Running update/reinstall against $ip..."
+            $rc = Run-Installer $py @()
+        }
+        "2" {
+            Write-Step "Running revert against $ip..."
+            $rc = Run-Installer $py @("--revert")
+        }
+        "3" {
+            Write-Ok "Exited without changes."
+            exit 0
+        }
+    }
+} elseif ($detected.Status -eq "fresh") {
+    Write-Ok "No existing install detected. Proceeding with fresh install."
+    Write-Step "Running installer against $ip (board=$($detected.Board))..."
+    $rc = Run-Installer $py @()
+} else {
+    Write-Warn "Could not determine install state. Detect output:"
+    Write-Host $detected.RawOutput
+    $go = Read-Host "Proceed with install anyway? [y/N]"
+    if ($go -ne "y") { exit 1 }
+    $rc = Run-Installer $py @()
 }
 
 Write-Host ""
 if ($rc -eq 0) {
-    Write-Ok "Done! Slice a test print with exclude_object enabled."
+    Write-Ok "Done!"
+    Write-Host ""
+    Write-Host "Local backups kept at: $BackupDir" -ForegroundColor Gray
+    Write-Host "These survive printer firmware updates. Keep them safe." -ForegroundColor Gray
     Write-Host ""
     Write-Host "To revert later:" -ForegroundColor Gray
     Write-Host "  .\install.ps1 -Host $ip -Revert" -ForegroundColor Gray

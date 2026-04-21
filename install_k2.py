@@ -124,13 +124,15 @@ LINE_PURGE_LINE = "  # KAMP-K2: adaptive purge line at print-area edge\n  LINE_P
 class Installer:
     def __init__(self, host: str, user: str, password: str,
                  dry_run: bool = False, verbose: bool = False,
-                 board: str = "auto") -> None:
+                 board: str = "auto",
+                 local_backup_dir: str | None = None) -> None:
         self.host = host
         self.user = user
         self.password = password
         self.dry_run = dry_run
         self.verbose = verbose
         self.board = board  # "auto" | "F008" | "F021"
+        self.local_backup_dir = local_backup_dir
         self.ssh: paramiko.SSHClient | None = None
         self.changes_made: list[str] = []
 
@@ -262,6 +264,43 @@ class Installer:
         cfg = self.read_remote(PRINTER_CFG)
         return re.search(r"^\[exclude_object\]", cfg, re.MULTILINE) is not None
 
+    def is_installed(self) -> bool:
+        """Detect whether KAMP-K2 is already installed on the printer.
+
+        Checks three independent markers so a half-install still reports
+        as installed (better to treat a partial install as installed than
+        as fresh — avoids double-patching configs).
+        """
+        markers = [
+            "/usr/share/klipper/klippy/extras/restore_bed_mesh.py",
+            "/mnt/UDISK/printer_data/config/KAMP/KAMP_Settings.cfg",
+        ]
+        for path in markers:
+            if self.remote_exists(path):
+                return True
+        # Also check printer.cfg for our include line
+        try:
+            cfg = self.read_remote(PRINTER_CFG)
+            if "[restore_bed_mesh]" in cfg or "KAMP/KAMP_Settings.cfg" in cfg:
+                return True
+        except FileNotFoundError:
+            pass
+        return False
+
+    def detect(self) -> None:
+        """Print machine-readable status and exit. Used by install.ps1 to
+        decide whether to show the install or revert/update menu."""
+        self.sanity_check()
+        installed = self.is_installed()
+        board = "unknown"
+        try:
+            board = self.detect_board()
+        except Exception:
+            pass
+        print(f"KAMPK2_STATUS={'installed' if installed else 'fresh'}")
+        print(f"KAMPK2_BOARD={board}")
+        print(f"KAMPK2_HOST={self.host}")
+
     def detect_board(self) -> str:
         """Return "F008" (K2 Plus dual-Z) or "F021" (K2/Combo/Pro single-Z).
 
@@ -299,7 +338,6 @@ class Installer:
     # ---- install steps ----
     def backup_configs(self) -> None:
         # Prefer SSD if available (firmware-update survivable)
-        rc, _, _ = self.run("test -d /mnt/exUDISK && echo yes || echo no")
         ts = time.strftime("%Y%m%d_%H%M%S")
         if "yes" in self.run("test -d /mnt/exUDISK && echo yes")[1]:
             base = f"/mnt/exUDISK/.system/kamp_k2_backup_{ts}"
@@ -308,6 +346,9 @@ class Installer:
         self.log(f"Backing up current configs to {base}/", "step")
         if self.dry_run:
             self.log(f"[dry-run] would create {base} and copy configs", "dry")
+            if self.local_backup_dir:
+                self.log(f"[dry-run] would also mirror backup to "
+                         f"{self.local_backup_dir}", "dry")
             return
         self.run(f"mkdir -p '{base}'")
         self.run(f"cp {PRINTER_CFG} '{base}/printer.cfg'")
@@ -315,7 +356,51 @@ class Installer:
         self.run(f"[ -d /mnt/UDISK/printer_data/config/KAMP ] && "
                  f"cp -r /mnt/UDISK/printer_data/config/KAMP '{base}/KAMP' "
                  f"|| true")
-        self.log(f"Backup saved.", "ok")
+        self.log(f"On-printer backup saved: {base}", "ok")
+
+        # Also mirror to the user's PC if a local backup dir was given.
+        # Motivation: Creality firmware updates wipe /mnt/UDISK entirely and
+        # can also wipe /mnt/exUDISK/.system in some variants. A copy on the
+        # user's PC survives any printer-side wipe.
+        if self.local_backup_dir:
+            safe_host = re.sub(r"[^0-9A-Za-z_.-]", "_", self.host)
+            local_dir = os.path.join(
+                self.local_backup_dir, f"{safe_host}_{ts}")
+            try:
+                os.makedirs(local_dir, exist_ok=True)
+                printer_cfg = self.read_remote(PRINTER_CFG)
+                with open(os.path.join(local_dir, "printer.cfg"), "w",
+                          encoding="utf-8", newline="") as f:
+                    f.write(printer_cfg)
+                gcode_cfg = self.read_remote(GCODE_MACRO_CFG)
+                with open(os.path.join(local_dir, "gcode_macro.cfg"), "w",
+                          encoding="utf-8", newline="") as f:
+                    f.write(gcode_cfg)
+                # Optionally mirror KAMP dir if it already exists (on re-install)
+                rc, out, _ = self.run(
+                    "test -d /mnt/UDISK/printer_data/config/KAMP && "
+                    "ls /mnt/UDISK/printer_data/config/KAMP 2>/dev/null")
+                if rc == 0 and out.strip():
+                    kamp_local = os.path.join(local_dir, "KAMP")
+                    os.makedirs(kamp_local, exist_ok=True)
+                    for fname in out.strip().splitlines():
+                        fname = fname.strip()
+                        if not fname:
+                            continue
+                        try:
+                            content = self.read_remote(
+                                f"/mnt/UDISK/printer_data/config/KAMP/{fname}")
+                            with open(os.path.join(kamp_local, fname), "w",
+                                      encoding="utf-8", newline="") as f:
+                                f.write(content)
+                        except Exception as e:
+                            self.log(f"  local backup: skipped "
+                                     f"KAMP/{fname}: {e}", "warn")
+                self.log(f"Local PC backup saved: {local_dir} "
+                         "(survives printer firmware updates)", "ok")
+            except Exception as e:
+                self.log(f"Local backup failed: {e} (on-printer backup "
+                         "still saved)", "warn")
 
     def copy_files(self) -> None:
         self.log("Copying KAMP-K2 files to printer...", "step")
@@ -632,26 +717,70 @@ class Installer:
                 return path
         return None
 
+    def find_local_backup(self) -> str | None:
+        """Find the newest local-PC backup for this host in local_backup_dir."""
+        if not self.local_backup_dir or not os.path.isdir(self.local_backup_dir):
+            return None
+        safe_host = re.sub(r"[^0-9A-Za-z_.-]", "_", self.host)
+        candidates = []
+        try:
+            for name in os.listdir(self.local_backup_dir):
+                full = os.path.join(self.local_backup_dir, name)
+                if (os.path.isdir(full)
+                        and name.startswith(f"{safe_host}_")
+                        and os.path.isfile(os.path.join(full, "printer.cfg"))
+                        and os.path.isfile(
+                            os.path.join(full, "gcode_macro.cfg"))):
+                    candidates.append((os.path.getmtime(full), full))
+        except OSError:
+            return None
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
     def revert(self) -> None:
-        """Restore the most recent kamp_k2_backup and remove installed files."""
+        """Restore the most recent backup and remove installed files.
+
+        Order of preference: on-printer backup (SSD/UDISK) first, then
+        local PC backup (--local-backup-dir). Firmware updates wipe
+        the on-printer copies, so the local copy is the safety net."""
         self.log("=== Sanity checks ===", "step")
         self.sanity_check()
 
         self.log("=== Finding latest backup ===", "step")
         backup = self.find_latest_backup()
+        local_backup = self.find_local_backup()
+        use_local = False
         if not backup:
-            self.log("No kamp_k2_backup_* directory found on the printer.",
-                     "err")
+            self.log("No on-printer kamp_k2_backup_* directory found.", "warn")
             self.log("Checked /mnt/exUDISK/.system and "
-                     "/mnt/UDISK/printer_data/config/backups", "err")
-            self.log("If you installed manually, restore your own backup and "
-                     "remove: restore_bed_mesh.py, [restore_bed_mesh], "
-                     "[include KAMP/...], KAMP/ directory.", "err")
-            sys.exit(1)
-        self.log(f"Using backup: {backup}", "ok")
+                     "/mnt/UDISK/printer_data/config/backups", "warn")
+            if local_backup:
+                self.log(f"Found local PC backup: {local_backup}", "ok")
+                self.log("Will restore from local PC backup (firmware update "
+                         "likely wiped the on-printer backup).", "ok")
+                backup = local_backup
+                use_local = True
+            else:
+                self.log("No local PC backup either. Aborting.", "err")
+                self.log("If you installed manually, restore your own backup "
+                         "and remove: restore_bed_mesh.py, "
+                         "[restore_bed_mesh], [include KAMP/...], "
+                         "KAMP/ directory.", "err")
+                sys.exit(1)
+        else:
+            self.log(f"Using on-printer backup: {backup}", "ok")
+            if local_backup:
+                self.log(f"(local PC backup also available: {local_backup})",
+                         "info")
 
         # Confirm contents
-        rc, out, _ = self.run(f"ls '{backup}'")
+        if use_local:
+            files = os.listdir(backup)
+            out = "\n".join(files)
+        else:
+            rc, out, _ = self.run(f"ls '{backup}'")
         self.log(f"Backup contents: {out.strip().replace(chr(10), ', ')}",
                  "info")
         if "printer.cfg" not in out or "gcode_macro.cfg" not in out:
@@ -660,11 +789,11 @@ class Installer:
             sys.exit(1)
 
         if self.dry_run:
-            self.log(f"[dry-run] would:", "dry")
-            self.log(f"[dry-run]   cp {backup}/printer.cfg -> {PRINTER_CFG}",
-                     "dry")
-            self.log(f"[dry-run]   cp {backup}/gcode_macro.cfg -> "
-                     f"{GCODE_MACRO_CFG}", "dry")
+            self.log(f"[dry-run] would restore from "
+                     f"{'local PC' if use_local else 'on-printer'} "
+                     f"backup at {backup}", "dry")
+            self.log(f"[dry-run]   printer.cfg -> {PRINTER_CFG}", "dry")
+            self.log(f"[dry-run]   gcode_macro.cfg -> {GCODE_MACRO_CFG}", "dry")
             self.log("[dry-run]   rm /usr/share/klipper/klippy/extras/"
                      "restore_bed_mesh.py", "dry")
             self.log("[dry-run]   rm -rf /mnt/UDISK/printer_data/config/KAMP",
@@ -673,8 +802,17 @@ class Installer:
             return
 
         self.log("=== Restoring configs ===", "step")
-        self.run(f"cp '{backup}/printer.cfg' {PRINTER_CFG}")
-        self.run(f"cp '{backup}/gcode_macro.cfg' {GCODE_MACRO_CFG}")
+        if use_local:
+            # Push local files up to the printer
+            with open(os.path.join(backup, "printer.cfg"), "r",
+                      encoding="utf-8") as f:
+                self.write_remote(PRINTER_CFG, f.read())
+            with open(os.path.join(backup, "gcode_macro.cfg"), "r",
+                      encoding="utf-8") as f:
+                self.write_remote(GCODE_MACRO_CFG, f.read())
+        else:
+            self.run(f"cp '{backup}/printer.cfg' {PRINTER_CFG}")
+            self.run(f"cp '{backup}/gcode_macro.cfg' {GCODE_MACRO_CFG}")
         self.log("printer.cfg + gcode_macro.cfg restored from backup", "ok")
 
         self.log("=== Removing KAMP-K2 installed files ===", "step")
@@ -727,19 +865,38 @@ def main() -> None:
     ap.add_argument("--revert", action="store_true",
                     help="Restore the most recent kamp_k2_backup and remove "
                          "all KAMP-K2 installed files, returning the printer "
-                         "to its pre-install state.")
+                         "to its pre-install state. Tries on-printer backup "
+                         "first, falls back to --local-backup-dir if set "
+                         "(useful after a firmware update wipes the printer).")
     ap.add_argument("--board", choices=["auto", "F008", "F021"], default="auto",
                     help="Board variant override. auto (default) detects from "
                          "printer.cfg. F008 = K2 Plus (dual-Z, needs "
                          "forced_leveling patch). F021 = K2 / K2 Combo / K2 "
                          "Pro (single-Z, no forced_leveling patch).")
+    ap.add_argument("--detect", action="store_true",
+                    help="Connect, report whether KAMP-K2 is already "
+                         "installed, print machine-readable KAMPK2_STATUS="
+                         "installed|fresh + KAMPK2_BOARD=... lines, and exit. "
+                         "Used by install.ps1 to drive the install/update/"
+                         "revert menu.")
+    ap.add_argument("--local-backup-dir", default=None,
+                    help="Also mirror the printer.cfg + gcode_macro.cfg "
+                         "backup to this directory on the PC running the "
+                         "installer. Firmware updates wipe printer-side "
+                         "backups; this copy survives. --revert uses it as "
+                         "a fallback when the printer has no backup.")
     args = ap.parse_args()
 
     inst = Installer(args.host, args.user, args.password,
                      dry_run=args.dry_run, verbose=args.verbose,
-                     board=args.board)
+                     board=args.board,
+                     local_backup_dir=args.local_backup_dir)
     try:
         inst.connect()
+
+        if args.detect:
+            inst.detect()
+            return
 
         if args.revert:
             inst.revert()
