@@ -834,6 +834,45 @@ class Installer:
                 return path
         return None
 
+    def find_cleanest_backup(self) -> str | None:
+        """Find the backup most likely to represent a pre-KAMP-K2 baseline.
+
+        Each install creates a backup at install-time. If the user installed
+        KAMP-K2 multiple times, later backups include the prior install's
+        KAMP cfgs (and any duplicates that accumulated). We want the
+        earliest backup whose `printer.cfg` has NO `[restore_bed_mesh]` and
+        NO `[include KAMP/...]` -- that's the pristine Creality state.
+
+        Falls back to the oldest backup if no fully-clean one is found.
+        """
+        candidates = []
+        for base in ["/mnt/exUDISK/.system",
+                     "/mnt/UDISK/printer_data/config/backups"]:
+            rc, out, _ = self.run(
+                f"ls -1d '{base}'/kamp_k2_backup_* 2>/dev/null")
+            for path in out.strip().splitlines():
+                path = path.strip()
+                if path:
+                    candidates.append(path)
+        if not candidates:
+            return None
+        # Sort oldest first (timestamp is lexicographically sortable)
+        candidates.sort()
+        for path in candidates:
+            pcfg_path = f"{path}/printer.cfg"
+            try:
+                pcfg = self.read_remote(pcfg_path)
+            except FileNotFoundError:
+                continue
+            has_restore = bool(re.search(
+                r"^\s*\[restore_bed_mesh\]", pcfg, re.MULTILINE))
+            has_kamp = bool(re.search(
+                r"^\s*\[include\s+KAMP/", pcfg, re.MULTILINE))
+            if not has_restore and not has_kamp:
+                return path
+        # No pristine backup found; fall back to oldest available.
+        return candidates[0]
+
     def find_local_backup(self) -> str | None:
         """Find the newest local-PC backup for this host in local_backup_dir."""
         if not self.local_backup_dir or not os.path.isdir(self.local_backup_dir):
@@ -855,6 +894,48 @@ class Installer:
             return None
         candidates.sort(reverse=True)
         return candidates[0][1]
+
+    def clean_wipe(self) -> None:
+        """Wipe the installed KAMP-K2 files and restore configs from the
+        CLEANEST (pre-KAMP-K2) backup found on the printer. No klippy
+        restart, no user prompts -- this is the programmatic step used
+        before a clean-reinstall. Safer than the user-facing revert()
+        because it picks the earliest pristine backup, not the latest
+        (which on a multi-install system is contaminated)."""
+        self.log("Searching for cleanest (pre-install) backup...", "step")
+        backup = self.find_cleanest_backup()
+        if not backup:
+            self.log("No backups found; cannot auto-wipe. Manual revert "
+                     "required.", "err")
+            sys.exit(1)
+        # Re-read it to confirm it's actually clean.
+        try:
+            pcfg = self.read_remote(f"{backup}/printer.cfg")
+        except FileNotFoundError:
+            self.log(f"Backup {backup} is missing printer.cfg", "err")
+            sys.exit(1)
+        is_pristine = not (
+            re.search(r"^\s*\[restore_bed_mesh\]", pcfg, re.MULTILINE)
+            or re.search(r"^\s*\[include\s+KAMP/", pcfg, re.MULTILINE)
+        )
+        if is_pristine:
+            self.log(f"Cleanest backup: {backup} (pristine, pre-install)",
+                     "ok")
+        else:
+            self.log(f"Cleanest backup: {backup} (WARNING: already "
+                     "contains KAMP entries -- no fully pristine backup "
+                     "found, using oldest available)", "warn")
+
+        self.log(f"Restoring printer.cfg + gcode_macro.cfg from {backup}",
+                 "step")
+        self.run(f"cp '{backup}/printer.cfg' {PRINTER_CFG}")
+        self.run(f"cp '{backup}/gcode_macro.cfg' {GCODE_MACRO_CFG}")
+
+        self.log("Removing previous KAMP-K2 files (restore_bed_mesh.py + "
+                 "KAMP/ dir)", "step")
+        self.run("rm -f /usr/share/klipper/klippy/extras/restore_bed_mesh.py")
+        self.run("rm -rf /mnt/UDISK/printer_data/config/KAMP")
+        self.log("Wipe complete. Ready for fresh install.", "ok")
 
     def revert(self) -> None:
         """Restore the most recent backup and remove installed files.
@@ -985,6 +1066,12 @@ def main() -> None:
                          "to its pre-install state. Tries on-printer backup "
                          "first, falls back to --local-backup-dir if set "
                          "(useful after a firmware update wipes the printer).")
+    ap.add_argument("--clean-reinstall", action="store_true",
+                    help="Wipe existing KAMP-K2 files, restore configs from "
+                         "the EARLIEST (pristine, pre-KAMP-K2) backup, then "
+                         "do a full fresh install in one run. Use this if a "
+                         "previous install accumulated duplicates or left "
+                         "the printer in an inconsistent state.")
     ap.add_argument("--board", choices=["auto", "F008", "F021"], default="auto",
                     help="Board variant override. auto (default) detects from "
                          "printer.cfg. F008 = K2 Plus (dual-Z, needs "
@@ -1018,6 +1105,13 @@ def main() -> None:
         if args.revert:
             inst.revert()
             return
+
+        if args.clean_reinstall:
+            inst.log("=== CLEAN REINSTALL: wipe, then install fresh ===",
+                     "step")
+            inst.sanity_check()
+            inst.clean_wipe()
+            # Fall through into the normal install flow below.
 
         inst.log("=== Sanity checks ===", "step")
         inst.sanity_check()

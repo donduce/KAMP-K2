@@ -288,11 +288,14 @@ function Show-Menu($detected) {
     Write-Host ""
     Write-Host "  [1] Update / reinstall (pulls latest from GitHub)"
     Write-Host "  [2] Revert (restore original Creality configs, remove KAMP-K2)"
-    Write-Host "  [3] Exit without changes"
+    Write-Host "  [3] Clean reinstall (wipe everything and install fresh)"
+    Write-Host "      - recommended if previous installs left duplicates"
+    Write-Host "      - equivalent to Revert + Update in one step"
+    Write-Host "  [4] Exit without changes"
     Write-Host ""
     do {
-        $choice = Read-Host "Choose [1-3]"
-    } while ($choice -notin @("1", "2", "3"))
+        $choice = Read-Host "Choose [1-4]"
+    } while ($choice -notin @("1", "2", "3", "4"))
     return $choice
 }
 
@@ -354,6 +357,10 @@ if ($detected.Status -eq "installed") {
             $rc = Run-Installer $py @("--revert")
         }
         "3" {
+            Write-Step "Running clean reinstall (wipe + install) against $ip..."
+            $rc = Run-Installer $py @("--clean-reinstall")
+        }
+        "4" {
             Write-Ok "Exited without changes."
             exit 0
         }
