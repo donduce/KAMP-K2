@@ -314,6 +314,7 @@ show_menu() {
 }
 
 RC=0
+FRESH_INSTALL=0
 if [ "$STATUS" = "installed" ]; then
     CHOICE="$(show_menu)"
     case "$CHOICE" in
@@ -322,13 +323,15 @@ if [ "$STATUS" = "installed" ]; then
         2) step "Running revert against $PRINTER_HOST..."
            run_installer --revert || RC=$? ;;
         3) step "Running clean reinstall against $PRINTER_HOST..."
-           run_installer --clean-reinstall || RC=$? ;;
+           run_installer --clean-reinstall || RC=$?
+           FRESH_INSTALL=1 ;;
         4) ok "Exited without changes."; exit 0 ;;
     esac
 elif [ "$STATUS" = "fresh" ]; then
     ok "No existing install detected. Proceeding with fresh install."
     step "Running installer against $PRINTER_HOST (board=$BOARD_DETECTED)..."
     run_installer || RC=$?
+    FRESH_INSTALL=1
 else
     warn "Could not determine install state."
     if [ ! -r "$TTY" ]; then
@@ -339,18 +342,33 @@ else
     read -r go <"$TTY"
     [ "$go" = "y" ] || { ok "Exited without changes."; exit 0; }
     run_installer || RC=$?
+    FRESH_INSTALL=1
 fi
 
 echo
 printf '%s================================================================%s\n' "$C_CYAN" "$C_RESET"
 if [ "$RC" -eq 0 ]; then
     ok "KAMP-K2 install complete."
-    echo
-    echo "Next step:"
-    echo "  Slice a test print in Orca/Prusa/etc. with 'exclude_object'"
-    echo "  enabled, send it to your printer via the slicer (NOT via USB"
-    echo "  drive or touchscreen), and watch the console for the"
-    echo "  'Adapted probe count' line during bed meshing."
+
+    # On a fresh install (or clean-reinstall), print the ready-to-paste
+    # slicer block. Most common case is Orca + F021; users on other
+    # setups can re-run slicer_gcode.py themselves.
+    if [ "$FRESH_INSTALL" -eq 1 ] && [ -f "$INSTALL_DIR/slicer_gcode.py" ]; then
+        BOARD_FOR_GCODE="F021"
+        case "$BOARD_DETECTED" in F008|F021) BOARD_FOR_GCODE="$BOARD_DETECTED" ;; esac
+        echo
+        "$VENV_PY" "$INSTALL_DIR/slicer_gcode.py" \
+            --slicer orca --board "$BOARD_FOR_GCODE" || true
+        printf '%sOn a different slicer? Regenerate with:%s\n' "$C_GRAY" "$C_RESET"
+        printf '%s  %s %s/slicer_gcode.py --slicer prusa|bambu|super%s\n' \
+            "$C_GRAY" "$VENV_PY" "$INSTALL_DIR" "$C_RESET"
+    else
+        echo
+        echo "Next step:"
+        echo "  Slice a test print in Orca/Prusa/etc. with 'exclude_object'"
+        echo "  enabled, send it via the slicer (NOT via USB drive or"
+        echo "  touchscreen), and watch for the 'Adapted probe count' line."
+    fi
     echo
     printf '%sLocal backups kept at: %s%s\n' "$C_GRAY" "$BACKUP_DIR" "$C_RESET"
     printf '%sThese survive printer firmware updates. Keep them safe.%s\n' "$C_GRAY" "$C_RESET"

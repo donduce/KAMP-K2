@@ -345,6 +345,7 @@ if ($Revert) {
 
 # Detect existing install and branch.
 $detected = Detect-Install $py
+$freshInstall = $false
 if ($detected.Status -eq "installed") {
     $choice = Show-Menu $detected
     switch ($choice) {
@@ -359,6 +360,7 @@ if ($detected.Status -eq "installed") {
         "3" {
             Write-Step "Running clean reinstall (wipe + install) against $ip..."
             $rc = Run-Installer $py @("--clean-reinstall")
+            $freshInstall = $true
         }
         "4" {
             Write-Ok "Exited without changes."
@@ -369,24 +371,41 @@ if ($detected.Status -eq "installed") {
     Write-Ok "No existing install detected. Proceeding with fresh install."
     Write-Step "Running installer against $ip (board=$($detected.Board))..."
     $rc = Run-Installer $py @()
+    $freshInstall = $true
 } else {
     Write-Warn "Could not determine install state. Detect output:"
     Write-Host $detected.RawOutput
     $go = Read-Host "Proceed with install anyway? [y/N]"
     if ($go -ne "y") { exit 1 }
     $rc = Run-Installer $py @()
+    $freshInstall = $true
 }
 
 Write-Host ""
 Write-Host "================================================================" -ForegroundColor Cyan
 if ($rc -eq 0) {
     Write-Ok "KAMP-K2 install complete."
-    Write-Host ""
-    Write-Host "Next step:" -ForegroundColor White
-    Write-Host "  Slice a test print in Orca/Prusa/etc. with 'exclude_object'" -ForegroundColor White
-    Write-Host "  enabled, send it to your printer via Orca (NOT via USB" -ForegroundColor White
-    Write-Host "  drive or touchscreen), and watch the console for the" -ForegroundColor White
-    Write-Host "  'Adapted probe count' line during bed meshing." -ForegroundColor White
+
+    # On a fresh install (or clean-reinstall), auto-print the ready-to-paste
+    # slicer block. Orca is the common case; users on other slicers can
+    # re-run slicer_gcode.py themselves.
+    $gcodeScript = Join-Path $InstallDir "slicer_gcode.py"
+    if ($freshInstall -and (Test-Path $gcodeScript)) {
+        $boardForGcode = "F021"
+        if ($detected.Board -in @("F008", "F021")) { $boardForGcode = $detected.Board }
+        Write-Host ""
+        # --no-color: PS 5.1's default console can render ANSI inconsistently
+        # depending on host. The generator's own layout is clear without it.
+        & $py $gcodeScript --slicer orca --board $boardForGcode --no-color 2>&1 | Out-Host
+        Write-Host "On a different slicer? Regenerate with:" -ForegroundColor Gray
+        Write-Host "  $py $gcodeScript --slicer prusa|bambu|super" -ForegroundColor Gray
+    } else {
+        Write-Host ""
+        Write-Host "Next step:" -ForegroundColor White
+        Write-Host "  Slice a test print in Orca/Prusa/etc. with 'exclude_object'" -ForegroundColor White
+        Write-Host "  enabled, send it via the slicer (NOT via USB drive or" -ForegroundColor White
+        Write-Host "  touchscreen), and watch for the 'Adapted probe count' line." -ForegroundColor White
+    }
     Write-Host ""
     Write-Host "Local backups kept at: $BackupDir" -ForegroundColor Gray
     Write-Host "These survive printer firmware updates. Keep them safe." -ForegroundColor Gray

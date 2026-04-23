@@ -116,6 +116,12 @@ M204 S2000
 M83
 ```
 
+> **Forgot what to paste?** The installer auto-prints this block on fresh installs. To regenerate it any time:
+> ```sh
+> python3 ~/KAMP-K2/slicer_gcode.py                  # Orca (default)
+> python3 ~/KAMP-K2/slicer_gcode.py --board F008     # K2 Plus (mesh max 345,345)
+> ```
+
 > **Why these exact lines, in this order**:
 > - `START_PRINT` runs heating, homing, adaptive mesh, nozzle clean. Does **not** load filament (that's slicer-side on K2).
 > - `T[initial_no_support_extruder]` triggers the CFS (or direct-drive loader) to actually pull filament to the nozzle.
@@ -140,7 +146,18 @@ START_PRINT EXTRUDER_TEMP=[...] BED_TEMP=[...] MESH=0
 
 ### Other slicers
 
-Any slicer that supports `[exclude_object]` / object-labeled gcode output will work. PrusaSlicer and SuperSlicer both do. The only requirement is that the `EXCLUDE_OBJECT_DEFINE` lines appear in the file **before** the `START_PRINT` call, so `printer.exclude_object.objects` is populated by the time KAMP reads it. OrcaSlicer does this by default; other slicers vary.
+Any slicer that supports `[exclude_object]` / object-labeled gcode output will work. PrusaSlicer, SuperSlicer, and Bambu Studio all do. The only requirement is that the `EXCLUDE_OBJECT_DEFINE` lines appear in the file **before** the `START_PRINT` call, so `printer.exclude_object.objects` is populated by the time KAMP reads it. OrcaSlicer does this by default; other slicers vary.
+
+The [`slicer_gcode.py`](slicer_gcode.py) helper prints a ready-to-paste block for each supported slicer, with the correct placeholder syntax and paste location:
+
+```sh
+python3 slicer_gcode.py --slicer bambu        # Bambu Studio (same as Orca)
+python3 slicer_gcode.py --slicer prusa        # PrusaSlicer
+python3 slicer_gcode.py --slicer super        # SuperSlicer
+python3 slicer_gcode.py --list                # show all + differences
+```
+
+No `paramiko` needed — pure stdlib, runs under any Python 3.
 
 ## Verifying it worked
 
