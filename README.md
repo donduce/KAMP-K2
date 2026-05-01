@@ -215,6 +215,17 @@ Built on top of:
 - [kyleisah/Klipper-Adaptive-Meshing-Purging](https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging) — the upstream KAMP project, unchanged in this fork
 - [pellcorp/creality](https://github.com/pellcorp/creality) — early K1 / K2 reverse-engineering groundwork
 
+## Want this done for you?
+
+Configuring Klipper yourself takes a weekend or two. If you'd rather skip the learning curve, [Hark Tech](https://harktech.co.uk/klipper-installation-service.html) — the maintainer of this project — offers professional Klipper installation, configuration and tuning for Creality K2 / K1 (and Ender, Voron-style and custom builds).
+
+- **Remote install over SSH:** from £80
+- **K2 / K1 full Klipper migration** (vendor features kept — camera, AMS/CFS, chamber, lights): from £120
+- **Mail-in install + tuning:** from £150
+- Includes input shaper sweep, pressure advance per material, bed mesh, slicer profiles for Orca / PrusaSlicer / Cura, and your config delivered in a git repo.
+
+Free pre-flight fit check on every job. UK-wide.
+
 ## Licence
 
 GPL v3, matching upstream KAMP and Klipper. See [`LICENSE.md`](LICENSE.md).
