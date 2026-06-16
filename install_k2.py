@@ -621,7 +621,19 @@ class Installer:
                 cfg = cfg.replace(anchor, snippet, 1)
                 changes = True
             else:
-                cfg = cfg.rstrip() + PRINTER_CFG_SNIPPET + "\n"
+                # No [exclude_object] anchor -- insert before Klipper's
+                # SAVE_CONFIG autosave block (the trailing "#*#" lines) so a
+                # later SAVE_CONFIG can't clobber the autosave region (which
+                # holds prtouch_v3's z_offset and the saved bed mesh). Fall
+                # back to a plain append only when there's no autosave block.
+                block = PRINTER_CFG_SNIPPET.strip("\n")
+                m = re.search(r"^#\*#\s*<[-\s]*SAVE_CONFIG", cfg,
+                              re.MULTILINE)
+                if m:
+                    cfg = (cfg[:m.start()].rstrip() + "\n\n" + block
+                           + "\n\n" + cfg[m.start():])
+                else:
+                    cfg = cfg.rstrip() + "\n\n" + block + "\n"
                 changes = True
         elif not has_restore:
             # KAMP include is live but restore_bed_mesh is absent or
