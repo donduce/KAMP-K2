@@ -204,9 +204,43 @@ VENV_PY="$VENV_DIR/bin/python"
 # Quiet pip; upgrade is optional and we don't want a single slow mirror to
 # block the install.
 "$VENV_PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
-if ! "$VENV_PY" -c 'import paramiko' >/dev/null 2>&1; then
+
+paramiko_ok() { "$VENV_PY" -c 'import paramiko' >/dev/null 2>&1; }
+
+if ! paramiko_ok; then
     step "Installing paramiko into venv..."
-    "$VENV_PY" -m pip install --quiet paramiko
+    "$VENV_PY" -m pip install --quiet paramiko || true
+fi
+
+# A stale pip cache or an old system Python (e.g. the Xcode CLT Python 3.9
+# on macOS) can leave a `cryptography` binary that installs fine but fails
+# to import ("symbol not found in flat namespace '_ERR_get_error_all'").
+# One forced, cache-bypassing reinstall fixes the common case.
+if ! paramiko_ok; then
+    warn "paramiko installed but failed to import. Retrying with a clean download..."
+    "$VENV_PY" -m pip install --quiet --no-cache-dir --force-reinstall paramiko cryptography || true
+fi
+
+if ! paramiko_ok; then
+    err "paramiko still fails to import in this venv. Import error was:"
+    "$VENV_PY" -c 'import paramiko' 2>&1 | tail -5 || true
+    echo
+    warn "This is a problem with this machine's Python ($("$PY" --version 2>&1)),"
+    warn "not with the printer -- usually an outdated system Python."
+    case "$(uname -s)" in
+        Darwin)
+            warn "Fix: install a current Python, wipe the venv, and re-run:"
+            warn "  brew install python"
+            warn "  rm -rf \"$VENV_DIR\""
+            warn "  curl -fsSL https://raw.githubusercontent.com/grant0013/KAMP-K2/main/install.sh | bash"
+            ;;
+        *)
+            warn "Fix: install a current python3 from your distro, then:"
+            warn "  rm -rf \"$VENV_DIR\""
+            warn "and re-run this installer."
+            ;;
+    esac
+    exit 1
 fi
 PARAMIKO_VER="$("$VENV_PY" -c 'import paramiko; print(paramiko.__version__)')"
 ok "paramiko $PARAMIKO_VER ready"
@@ -248,7 +282,7 @@ run_installer() {
             --password "$PRINTER_PASSWORD" \
             --board "$BOARD" \
             --local-backup-dir "$BACKUP_DIR" \
-            "${flags[@]}" "${extra[@]}"
+            ${flags[@]+"${flags[@]}"} ${extra[@]+"${extra[@]}"}
     )
 }
 
