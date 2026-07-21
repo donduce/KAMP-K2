@@ -217,16 +217,11 @@ Built on top of:
 - [kyleisah/Klipper-Adaptive-Meshing-Purging](https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging) — the upstream KAMP project, unchanged in this fork
 - [pellcorp/creality](https://github.com/pellcorp/creality) — early K1 / K2 reverse-engineering groundwork
 
-## Want this done for you?
+## Stuck, or want a hand?
 
-Configuring Klipper yourself takes a weekend or two. If you'd rather skip the learning curve, [Hark Tech](https://harktech.co.uk/klipper-installation-service.html) — the maintainer of this project — offers professional Klipper installation, configuration and tuning for Creality K2 / K1 (and Ender, Voron-style and custom builds).
+[Hark Tech](https://harktech.co.uk), the maintainer of this project, runs a large free [Creality K2 help library](https://harktech.co.uk/help) covering Klipper, input shaper, pressure advance, bed mesh, slicer profiles and the common K2 failure modes. Stuck on something specific? [Get in touch](https://harktech.co.uk/contact.html) and ask: remote K2/Klipper help is available, priced per job.
 
-- **Remote install over SSH:** from £80
-- **K2 / K1 full Klipper migration** (vendor features kept — camera, AMS/CFS, chamber, lights): from £120
-- **Mail-in install + tuning:** from £150
-- Includes input shaper sweep, pressure advance per material, bed mesh, slicer profiles for Orca / PrusaSlicer / Cura, and your config delivered in a git repo.
-
-Free pre-flight fit check on every job. UK-wide.
+Hark Tech also runs a UK mail-in [3D print service](https://harktech.co.uk/printing.html) (instant quote from an STL, orders from £6, [full rate card](https://harktech.co.uk/pricing.html)) and a [gadget repair service](https://harktech.co.uk/repair.html) from the same bench.
 
 ## Licence
 
